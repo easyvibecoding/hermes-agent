@@ -1,12 +1,12 @@
 ---
 name: hermes-memory-bridge
-description: Bidirectional memory bridge — exposes Hermes MEMORY.md and USER.md to any MCP client (Claude Code, Cursor, VS Code, etc.) via a lightweight FastMCP stdio server with FTS5 session search.
-version: 1.0.0
+description: Bidirectional memory bridge — exposes Hermes MEMORY.md, USER.md, and session history to any MCP client (Claude Code, Cursor, VS Code, etc.) via a FastMCP stdio server. Includes atomic writes, file locking, prompt-injection scanning, session browsing, and dream-consolidation workflow support.
+version: 2.0.0
 author: easyvibecoding
 license: MIT
 metadata:
   hermes:
-    tags: [MCP, Memory, Claude Code, Integration, Bridge]
+    tags: [MCP, Memory, Claude Code, Integration, Bridge, Dream]
     related_skills: [native-mcp, claude-code]
 ---
 
@@ -16,18 +16,49 @@ Expose Hermes Agent's persistent memory system (MEMORY.md, USER.md) and session 
 
 ## Problem
 
-`hermes mcp serve` exposes conversation browsing tools but does **not** expose memory read/write. External agents like Claude Code cannot access Hermes memory without a custom bridge.
+`hermes mcp serve` exposes conversation browsing tools but does **not** expose memory read/write or session transcript access. External agents like Claude Code cannot access Hermes memory without a custom bridge.
 
 ## Solution
 
-A self-contained FastMCP server (`mcp-servers/hermes-memory-mcp.py`) that provides four tools:
+A self-contained FastMCP server (`mcp-servers/hermes-memory-mcp.py`) that provides 7 tools:
+
+### Memory Tools
 
 | Tool | Description |
 |------|-------------|
 | `read_memory(store)` | Read MEMORY.md, USER.md, or both |
 | `add_memory_entry(store, entry, old_text)` | Append or substring-replace in a memory store |
-| `memory_status()` | Char usage and section count for each store |
-| `session_search(query, limit, source)` | FTS5 full-text search across past sessions in state.db |
+| `remove_memory_entry(store, old_text)` | Remove a section or substring from a memory store |
+| `memory_status()` | Char usage, section count, and state.db session count |
+
+### Session Tools (Dream Workflow)
+
+| Tool | Description |
+|------|-------------|
+| `recent_sessions(limit, source)` | List recent sessions for review |
+| `session_read(session_id, last_n)` | Read transcript of a specific session |
+| `session_search(query, limit, source)` | FTS5 full-text search across all sessions |
+
+## Safety Features
+
+Aligned with Hermes built-in `memory_tool.py` (`tools/memory_tool.py`):
+
+- **Atomic writes** — temp file + `os.replace()` + `fsync` prevents corruption on crash
+- **File locking** — `fcntl.flock()` on `.lock` files prevents race conditions between Hermes and MCP clients writing concurrently
+- **Prompt-injection scanning** — rejects content containing role hijacking, instruction override, chat-template tokens, or invisible Unicode
+- **Read-only state.db** — all session queries use `?mode=ro` URI, no accidental mutation
+
+## Dream Workflow
+
+The session tools enable a **dream consolidation** pattern inspired by Honcho's `on_session_end` and Holographic's auto-extraction:
+
+1. **Review** — `recent_sessions()` to see what happened recently
+2. **Read** — `session_read(id)` to get the full transcript
+3. **Extract** — The LLM identifies key insights, decisions, or user preferences
+4. **Consolidate** — `add_memory_entry()` to persist insights; `remove_memory_entry()` to prune stale entries
+5. **Verify** — `memory_status()` to confirm capacity
+
+This can be automated via Claude Code hooks, cron jobs, or manual `/dream` commands.
 
 ## Prerequisites
 
@@ -69,14 +100,10 @@ Add to `~/.claude.json` (or project-level `.claude/settings.local.json`):
 In Claude Code:
 
 ```
-> /mcp
 > memory_status()
-```
-
-Expected output:
-```
 MEMORY.md: 892/2,200 chars (40.5%) — 5 sections
 USER.md: 461/1,375 chars (33.5%) — 5 sections
+state.db: 127 sessions (searchable via session_search)
 ```
 
 ## Architecture
@@ -88,24 +115,13 @@ USER.md: 461/1,375 chars (33.5%) — 5 sections
 │   └── USER.md            # User profile (1,375 char limit)
 ├── state.db               # SQLite with FTS5 session index
 └── mcp-servers/
-    ├── hermes-memory-mcp.py      # FastMCP server
+    ├── hermes-memory-mcp.py      # FastMCP server (7 tools)
     └── hermes-memory-runner.sh   # Shell wrapper for uv
 ```
 
 ### Memory Format
 
-Sections in MEMORY.md and USER.md are separated by `§` (section sign). The `add_memory_entry` tool respects this convention — new entries are appended with `§` separators, and the char limit is enforced before every write.
-
-### Session Search
-
-The `session_search` tool queries `state.db` via FTS5 full-text search. It supports:
-- Boolean operators: `AND`, `OR`, `NOT`
-- Phrase search: `"exact phrase"`
-- Source filtering: `source="claude-code"` to search only Claude Code sessions
-
-The database is opened in **read-only** mode to prevent any accidental modifications.
-
-## Important Notes
+Sections in MEMORY.md and USER.md are separated by `\n§\n` (newline + section sign + newline). The tools respect this convention — new entries are appended with `§` separators, removals clean up dangling separators, and char limits are enforced before every write.
 
 ### Frozen Snapshot Behavior
 
@@ -118,9 +134,3 @@ Hermes and Claude Code read different config files:
 - Claude Code: `~/.claude.json` → `mcpServers`
 
 Register the server in both to enable bidirectional access.
-
-### Security
-
-- `state.db` is opened read-only — session search cannot modify history
-- Memory writes enforce char limits — no risk of unbounded growth
-- The server runs locally via stdio — no network exposure
