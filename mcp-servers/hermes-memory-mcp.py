@@ -7,12 +7,22 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
+import platform
 import re
 import sqlite3
 import tempfile
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]  # Windows
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]  # Unix
 
 from mcp.server.fastmcp import FastMCP
 
@@ -80,19 +90,45 @@ def _locked_read_modify_write(path: Path, modifier):
 
     modifier(current_content) -> (new_content, result_message)
     Returns the result_message from modifier.
+
+    Uses fcntl.flock on Unix and msvcrt.locking on Windows (matching
+    Hermes MemoryStore cross-platform locking strategy).
     """
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.touch(exist_ok=True)
-    with open(lock_path) as lock_fd:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        try:
-            current = _read_file(path)
-            new_content, result = modifier(current)
-            if new_content is not None:
-                _atomic_write(path, new_content)
-            return result
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
+    if fcntl is not None:
+        # Unix: fcntl file locking
+        with open(lock_path) as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                current = _read_file(path)
+                new_content, result = modifier(current)
+                if new_content is not None:
+                    _atomic_write(path, new_content)
+                return result
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    elif msvcrt is not None:
+        # Windows: msvcrt file locking
+        with open(lock_path, "r+") as lock_fd:
+            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                current = _read_file(path)
+                new_content, result = modifier(current)
+                if new_content is not None:
+                    _atomic_write(path, new_content)
+                return result
+            finally:
+                lock_fd.seek(0)
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        # Fallback: no locking available
+        current = _read_file(path)
+        new_content, result = modifier(current)
+        if new_content is not None:
+            _atomic_write(path, new_content)
+        return result
 
 
 # ---------------------------------------------------------------------------
