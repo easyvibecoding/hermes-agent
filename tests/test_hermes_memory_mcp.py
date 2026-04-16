@@ -26,16 +26,16 @@ def _import_server(monkeypatch, tmp_path):
     memories_dir = tmp_path / "memories"
     memories_dir.mkdir()
 
-    monkeypatch.setattr(mod, "HERMES_DIR", tmp_path)
-    monkeypatch.setattr(mod, "MEMORIES_DIR", memories_dir)
-    monkeypatch.setattr(mod, "STATE_DB", tmp_path / "state.db")
-    monkeypatch.setattr(mod, "MEMORY_FILE", memories_dir / "MEMORY.md")
-    monkeypatch.setattr(mod, "USER_FILE", memories_dir / "USER.md")
-    monkeypatch.setattr(mod, "FILE_MAP", {
+    # Patch dynamic path functions to use tmp_path
+    monkeypatch.setattr(mod, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(mod, "_memory_file", lambda: memories_dir / "MEMORY.md")
+    monkeypatch.setattr(mod, "_user_file", lambda: memories_dir / "USER.md")
+    monkeypatch.setattr(mod, "_state_db", lambda: tmp_path / "state.db")
+    monkeypatch.setattr(mod, "_file_map", lambda: {
         "memory": memories_dir / "MEMORY.md",
         "user": memories_dir / "USER.md",
     })
-    monkeypatch.setattr(mod, "LIMIT_MAP", {
+    monkeypatch.setattr(mod, "_limit_map", lambda: {
         "memory": mod.CHAR_LIMIT_MEMORY,
         "user": mod.CHAR_LIMIT_USER,
     })
@@ -225,6 +225,11 @@ class TestAddMemoryEntry:
         content = (tmp_path / "memories" / "USER.md").read_text()
         assert "Name: Bob" in content
 
+    def test_section_delimiter_in_entry_blocked(self, mod):
+        result = mod.add_memory_entry("memory", "line one\n§\nline two")
+        assert "[Error]" in result
+        assert "delimiter" in result.lower()
+
 
 # =========================================================================
 # remove_memory_entry
@@ -274,7 +279,7 @@ class TestMemoryStatus:
         assert "2 sections" in result
 
     def test_status_with_db(self, mod, db, monkeypatch):
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         result = mod.memory_status()
         assert "2 sessions" in result
 
@@ -285,24 +290,24 @@ class TestMemoryStatus:
 
 class TestSessionSearch:
     def test_search_finds_match(self, mod, db, monkeypatch):
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         result = mod.session_search("memory providers")
         assert "Found" in result
         assert "sess_001" in result
 
     def test_search_no_match(self, mod, db, monkeypatch):
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         result = mod.session_search("xyznonexistent")
         assert "No results" in result
 
     def test_search_filter_by_source(self, mod, db, monkeypatch):
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         result = mod.session_search("memory", source="telegram")
         assert "sess_002" in result
         assert "sess_001" not in result
 
     def test_search_limit(self, mod, db, monkeypatch):
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         result = mod.session_search("memory", limit=1)
         assert "Found 1" in result
 
@@ -318,7 +323,7 @@ class TestSessionSearch:
 
 class TestSessionRead:
     def test_read_session(self, mod, db, monkeypatch):
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         result = mod.session_read("sess_001")
         assert "Test Session Alpha" in result
         assert "memory providers" in result
@@ -326,13 +331,13 @@ class TestSessionRead:
         assert "ASSISTANT:" in result
 
     def test_read_nonexistent_session(self, mod, db, monkeypatch):
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         result = mod.session_read("nonexistent")
         assert "[Error]" in result
         assert "not found" in result
 
     def test_read_limits_messages(self, mod, db, monkeypatch):
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         result = mod.session_read("sess_002", last_n=2)
         assert "Showing last 2 messages" in result
 
@@ -342,7 +347,7 @@ class TestSessionRead:
 
     def test_read_truncates_long_content(self, mod, db, monkeypatch, tmp_path):
         """Messages longer than 2000 chars should be truncated."""
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         conn = sqlite3.connect(str(db))
         now = time.time()
         conn.execute(
@@ -361,20 +366,20 @@ class TestSessionRead:
 
 class TestRecentSessions:
     def test_list_recent(self, mod, db, monkeypatch):
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         result = mod.recent_sessions()
         assert "sess_001" in result
         assert "sess_002" in result
         assert "Recent 2 session(s)" in result
 
     def test_filter_by_source(self, mod, db, monkeypatch):
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         result = mod.recent_sessions(source="cli")
         assert "sess_001" in result
         assert "sess_002" not in result
 
     def test_limit(self, mod, db, monkeypatch):
-        monkeypatch.setattr(mod, "STATE_DB", db)
+        monkeypatch.setattr(mod, "_state_db", lambda: db)
         result = mod.recent_sessions(limit=1)
         assert "Recent 1 session(s)" in result
 
@@ -393,7 +398,7 @@ class TestRecentSessions:
         """)
         conn.commit()
         conn.close()
-        monkeypatch.setattr(mod, "STATE_DB", empty_db)
+        monkeypatch.setattr(mod, "_state_db", lambda: empty_db)
         result = mod.recent_sessions()
         assert "No sessions found" in result
 

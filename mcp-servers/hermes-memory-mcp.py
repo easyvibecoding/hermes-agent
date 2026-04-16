@@ -25,19 +25,34 @@ except ImportError:
 
 from mcp.server.fastmcp import FastMCP
 
-HERMES_DIR = Path.home() / ".hermes"
-MEMORIES_DIR = HERMES_DIR / "memories"
-STATE_DB = HERMES_DIR / "state.db"
+def _hermes_home() -> Path:
+    """Resolve HERMES_HOME, respecting profiles and custom deployments."""
+    return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 
-MEMORY_FILE = MEMORIES_DIR / "MEMORY.md"
-USER_FILE = MEMORIES_DIR / "USER.md"
 
 CHAR_LIMIT_MEMORY = 2_200
 CHAR_LIMIT_USER = 1_375
 SECTION_SEP = "\n§\n"
 
-FILE_MAP = {"memory": MEMORY_FILE, "user": USER_FILE}
-LIMIT_MAP = {"memory": CHAR_LIMIT_MEMORY, "user": CHAR_LIMIT_USER}
+
+def _memory_file() -> Path:
+    return _hermes_home() / "memories" / "MEMORY.md"
+
+
+def _user_file() -> Path:
+    return _hermes_home() / "memories" / "USER.md"
+
+
+def _state_db() -> Path:
+    return _hermes_home() / "state.db"
+
+
+def _file_map() -> dict[str, Path]:
+    return {"memory": _memory_file(), "user": _user_file()}
+
+
+def _limit_map() -> dict[str, int]:
+    return {"memory": CHAR_LIMIT_MEMORY, "user": CHAR_LIMIT_USER}
 
 # Prompt-injection patterns (aligned with Hermes built-in memory_tool.py)
 _INJECTION_RE = re.compile(
@@ -94,33 +109,34 @@ def _locked_read_modify_write(path: Path, modifier):
     Hermes MemoryStore cross-platform locking strategy).
     """
     lock_path = path.with_suffix(path.suffix + ".lock")
-    lock_path.touch(exist_ok=True)
 
     if fcntl is not None:
-        # Unix: fcntl file locking
-        with open(lock_path) as lock_fd:
+        # Unix: fcntl file locking (matching Hermes MemoryStore._file_lock)
+        lock_fd = open(lock_path, "a+")
+        try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            try:
-                current = _read_file(path)
-                new_content, result = modifier(current)
-                if new_content is not None:
-                    _atomic_write(path, new_content)
-                return result
-            finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            current = _read_file(path)
+            new_content, result = modifier(current)
+            if new_content is not None:
+                _atomic_write(path, new_content)
+            return result
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
     elif msvcrt is not None:
-        # Windows: msvcrt file locking
-        with open(lock_path, "r+") as lock_fd:
+        # Windows: msvcrt file locking (matching Hermes MemoryStore._file_lock)
+        lock_fd = open(lock_path, "a+")
+        try:
             msvcrt.locking(lock_fd.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                current = _read_file(path)
-                new_content, result = modifier(current)
-                if new_content is not None:
-                    _atomic_write(path, new_content)
-                return result
-            finally:
-                lock_fd.seek(0)
-                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+            current = _read_file(path)
+            new_content, result = modifier(current)
+            if new_content is not None:
+                _atomic_write(path, new_content)
+            return result
+        finally:
+            lock_fd.seek(0)
+            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+            lock_fd.close()
     else:
         # Fallback: no locking available
         current = _read_file(path)
@@ -136,11 +152,13 @@ def _locked_read_modify_write(path: Path, modifier):
 
 
 def _scan_content(text: str) -> str | None:
-    """Return error message if content contains injection or invisible chars."""
+    """Return error message if content contains injection, invisible chars, or delimiter."""
     if _INJECTION_RE.search(text):
         return "[Error] Content rejected: contains prompt-injection patterns."
     if _INVISIBLE_RE.search(text):
         return "[Error] Content rejected: contains invisible Unicode characters."
+    if SECTION_SEP in text:
+        return "[Error] Content rejected: contains section delimiter (§). This would corrupt memory structure on reload."
     return None
 
 
@@ -158,10 +176,10 @@ def read_memory(store: str = "all") -> str:
     """
     parts: list[str] = []
     if store in ("all", "memory"):
-        content = _read_file(MEMORY_FILE)
+        content = _read_file(_memory_file())
         parts.append(f"=== MEMORY.md ({len(content)} chars) ===\n{content}")
     if store in ("all", "user"):
-        content = _read_file(USER_FILE)
+        content = _read_file(_user_file())
         parts.append(f"=== USER.md ({len(content)} chars) ===\n{content}")
     if not parts:
         return f"[Error] Unknown store '{store}'. Use 'memory', 'user', or 'all'."
@@ -182,15 +200,16 @@ def add_memory_entry(
         old_text: If provided, find this substring and replace it with `entry`.
                   If not provided, append `entry` as a new section (§-separated).
     """
-    if store not in FILE_MAP:
+    fmap = _file_map()
+    if store not in fmap:
         return f"[Error] Unknown store '{store}'. Use 'memory' or 'user'."
 
     scan_err = _scan_content(entry)
     if scan_err:
         return scan_err
 
-    path = FILE_MAP[store]
-    limit = LIMIT_MAP[store]
+    path = fmap[store]
+    limit = _limit_map()[store]
 
     def _modify(current: str):
         if old_text:
@@ -230,10 +249,11 @@ def remove_memory_entry(store: str, old_text: str) -> str:
         old_text: The exact text to remove. If it matches an entire §-section,
                   the section and its separator are removed cleanly.
     """
-    if store not in FILE_MAP:
+    fmap = _file_map()
+    if store not in fmap:
         return f"[Error] Unknown store '{store}'. Use 'memory' or 'user'."
 
-    path = FILE_MAP[store]
+    path = fmap[store]
 
     def _modify(current: str):
         if old_text not in current:
@@ -264,8 +284,8 @@ def memory_status() -> str:
     """Return current memory usage (char count / limit) for all stores."""
     lines: list[str] = []
     for label, path, limit in [
-        ("MEMORY.md", MEMORY_FILE, CHAR_LIMIT_MEMORY),
-        ("USER.md", USER_FILE, CHAR_LIMIT_USER),
+        ("MEMORY.md", _memory_file(), CHAR_LIMIT_MEMORY),
+        ("USER.md", _user_file(), CHAR_LIMIT_USER),
     ]:
         content = _read_file(path)
         chars = len(content)
@@ -275,9 +295,10 @@ def memory_status() -> str:
             f"{label}: {chars:,}/{limit:,} chars ({pct:.1f}%) — {sections} sections"
         )
 
-    if STATE_DB.exists():
+    sdb = _state_db()
+    if sdb.exists():
         try:
-            conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True, timeout=3)
+            conn = sqlite3.connect(f"file:{sdb}?mode=ro", uri=True, timeout=3)
             row = conn.execute(
                 "SELECT COUNT(*) AS cnt, MAX(started_at) AS latest FROM sessions"
             ).fetchone()
@@ -304,8 +325,9 @@ def session_search(
         limit: Max results to return (default 20, max 100).
         source: Optional filter by session source (e.g. "claude-code", "hermes").
     """
-    if not STATE_DB.exists():
-        return f"[Error] state.db not found at {STATE_DB}"
+    sdb = _state_db()
+    if not sdb.exists():
+        return f"[Error] state.db not found at {sdb}"
 
     limit = min(max(1, limit), 100)
 
@@ -335,7 +357,7 @@ def session_search(
 
     try:
         conn = sqlite3.connect(
-            f"file:{STATE_DB}?mode=ro",
+            f"file:{sdb}?mode=ro",
             uri=True,
             timeout=5,
         )
@@ -372,13 +394,14 @@ def session_read(session_id: str, last_n: int = 50) -> str:
         session_id: The session ID (e.g. "20260416_131733_2bd683").
         last_n: Number of most recent messages to return (default 50, max 200).
     """
-    if not STATE_DB.exists():
-        return f"[Error] state.db not found at {STATE_DB}"
+    sdb = _state_db()
+    if not sdb.exists():
+        return f"[Error] state.db not found at {sdb}"
 
     last_n = min(max(1, last_n), 200)
 
     try:
-        conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True, timeout=5)
+        conn = sqlite3.connect(f"file:{sdb}?mode=ro", uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
 
         session = conn.execute(
@@ -427,8 +450,9 @@ def recent_sessions(limit: int = 10, source: str | None = None) -> str:
         limit: Number of sessions to return (default 10, max 50).
         source: Optional filter by source (e.g. "cli", "telegram", "discord").
     """
-    if not STATE_DB.exists():
-        return f"[Error] state.db not found at {STATE_DB}"
+    sdb = _state_db()
+    if not sdb.exists():
+        return f"[Error] state.db not found at {sdb}"
 
     limit = min(max(1, limit), 50)
 
@@ -450,7 +474,7 @@ def recent_sessions(limit: int = 10, source: str | None = None) -> str:
     params.append(limit)
 
     try:
-        conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True, timeout=5)
+        conn = sqlite3.connect(f"file:{sdb}?mode=ro", uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(sql, params).fetchall()
         conn.close()

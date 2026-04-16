@@ -32,7 +32,7 @@ if [ -f "$USER_FILE" ] && [ -s "$USER_FILE" ]; then
 fi
 
 if [ -n "$context" ]; then
-    # Escape for JSON
+    # Escape for JSON and wrap in hookSpecificOutput format
     escaped=$(echo "$context" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
-    echo "{\"additionalContext\": $escaped}"
+    echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreCompact\",\"additionalContext\":$escaped}}"
 fi
