@@ -846,6 +846,27 @@ class TestInvalidateSystemPrompt:
         mock_store.load_from_disk.assert_called_once()
 
 
+class TestModelSwitchReloadsMemory:
+    def test_reloads_memory_store_on_switch(self, agent):
+        mock_store = MagicMock()
+        agent._memory_store = mock_store
+        agent._cached_system_prompt = "cached"
+        # Minimal switch — only need to reach the invalidation block
+        try:
+            agent.switch_model("test-model", "test-provider")
+        except Exception:
+            pass  # switch_model may fail on missing client setup; we only care about memory reload
+        mock_store.load_from_disk.assert_called_once()
+
+    def test_nulls_cached_prompt_on_switch(self, agent):
+        agent._cached_system_prompt = "cached"
+        try:
+            agent.switch_model("test-model", "test-provider")
+        except Exception:
+            pass
+        assert agent._cached_system_prompt is None
+
+
 class TestBuildApiKwargs:
     def test_basic_kwargs(self, agent):
         messages = [{"role": "user", "content": "hi"}]
