@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import os
-import platform
 import re
 import sqlite3
 import tempfile
@@ -369,9 +368,6 @@ def session_search(
 def session_read(session_id: str, last_n: int = 50) -> str:
     """Read the message transcript of a specific Hermes session.
 
-    Useful for reviewing what was discussed in a past session before
-    consolidating insights into memory (dream workflow).
-
     Args:
         session_id: The session ID (e.g. "20260416_131733_2bd683").
         last_n: Number of most recent messages to return (default 50, max 200).
@@ -425,7 +421,7 @@ def session_read(session_id: str, last_n: int = 50) -> str:
 
 @mcp.tool()
 def recent_sessions(limit: int = 10, source: str | None = None) -> str:
-    """List recent Hermes sessions for review or dream consolidation.
+    """List recent Hermes sessions.
 
     Args:
         limit: Number of sessions to return (default 10, max 50).

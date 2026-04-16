@@ -1,12 +1,12 @@
 ---
 name: hermes-memory-bridge
-description: Bidirectional memory bridge — exposes Hermes MEMORY.md, USER.md, and session history to any MCP client (Claude Code, Cursor, VS Code, etc.) via a FastMCP stdio server. Includes atomic writes, file locking, prompt-injection scanning, session browsing, and dream-consolidation workflow support.
-version: 2.0.0
+description: Expose Hermes MEMORY.md, USER.md, and session history (state.db) to external MCP clients (Claude Code, Cursor, VS Code, etc.) via a FastMCP stdio server. Complements Hermes in-process memory providers by enabling out-of-process read/write access.
+version: 1.0.0
 author: easyvibecoding
 license: MIT
 metadata:
   hermes:
-    tags: [MCP, Memory, Claude Code, Integration, Bridge, Dream]
+    tags: [MCP, Memory, Claude Code, Integration, Bridge]
     related_skills: [native-mcp, claude-code]
 ---
 
@@ -18,47 +18,45 @@ Expose Hermes Agent's persistent memory system (MEMORY.md, USER.md) and session 
 
 `hermes mcp serve` exposes conversation browsing tools but does **not** expose memory read/write or session transcript access. External agents like Claude Code cannot access Hermes memory without a custom bridge.
 
-## Solution
+## How This Relates to Existing Memory Consolidation
 
-A self-contained FastMCP server (`mcp-servers/hermes-memory-mcp.py`) that provides 7 tools:
+Hermes already has **in-process** memory lifecycle hooks for session-end consolidation:
 
-### Memory Tools
+- **Honcho** — `on_session_end` flushes pending data; `sync_turn` for per-turn background sync
+- **Holographic** — `on_session_end` with `auto_extract` uses regex to extract user preferences and project decisions into a local fact store; `on_memory_write` mirrors built-in memory writes
+- **`on_pre_compress`** — all providers can inject text into the compression summary
+
+These mechanisms run **inside** the Hermes process and are triggered automatically by agent lifecycle events. They do not require external access.
+
+This bridge takes a **complementary** approach — it provides **out-of-process read/write access** for MCP clients that coexist alongside Hermes. The session tools expose the same `state.db` data that internal providers consume via `on_session_end(messages)`, but make it available to agents running **outside** the Hermes process.
+
+## Tools (7)
+
+### Memory
 
 | Tool | Description |
 |------|-------------|
 | `read_memory(store)` | Read MEMORY.md, USER.md, or both |
 | `add_memory_entry(store, entry, old_text)` | Append or substring-replace in a memory store |
-| `remove_memory_entry(store, old_text)` | Remove a section or substring from a memory store |
-| `memory_status()` | Char usage, section count, and state.db session count |
+| `remove_memory_entry(store, old_text)` | Remove a section or substring cleanly |
+| `memory_status()` | Char usage, section count, state.db session count |
 
-### Session Tools (Dream Workflow)
+### Session
 
 | Tool | Description |
 |------|-------------|
-| `recent_sessions(limit, source)` | List recent sessions for review |
-| `session_read(session_id, last_n)` | Read transcript of a specific session |
+| `recent_sessions(limit, source)` | List recent sessions |
+| `session_read(session_id, last_n)` | Read full transcript of a session |
 | `session_search(query, limit, source)` | FTS5 full-text search across all sessions |
 
-## Safety Features
+## Safety
 
-Aligned with Hermes built-in `memory_tool.py` (`tools/memory_tool.py`):
+Aligned with Hermes built-in `tools/memory_tool.py`:
 
 - **Atomic writes** — temp file + `os.replace()` + `fsync` prevents corruption on crash
-- **File locking** — `fcntl.flock()` on `.lock` files prevents race conditions between Hermes and MCP clients writing concurrently
-- **Prompt-injection scanning** — rejects content containing role hijacking, instruction override, chat-template tokens, or invisible Unicode
-- **Read-only state.db** — all session queries use `?mode=ro` URI, no accidental mutation
-
-## Dream Workflow
-
-The session tools enable a **dream consolidation** pattern inspired by Honcho's `on_session_end` and Holographic's auto-extraction:
-
-1. **Review** — `recent_sessions()` to see what happened recently
-2. **Read** — `session_read(id)` to get the full transcript
-3. **Extract** — The LLM identifies key insights, decisions, or user preferences
-4. **Consolidate** — `add_memory_entry()` to persist insights; `remove_memory_entry()` to prune stale entries
-5. **Verify** — `memory_status()` to confirm capacity
-
-This can be automated via Claude Code hooks, cron jobs, or manual `/dream` commands.
+- **Cross-platform file locking** — `fcntl.flock` (Unix) / `msvcrt.locking` (Windows) / graceful fallback
+- **Prompt-injection scanning** — rejects role hijacking, instruction override, chat-template tokens, invisible Unicode
+- **Read-only state.db** — all session queries use `?mode=ro`
 
 ## Prerequisites
 
@@ -123,9 +121,9 @@ state.db: 127 sessions (searchable via session_search)
 
 Sections in MEMORY.md and USER.md are separated by `\n§\n` (newline + section sign + newline). The tools respect this convention — new entries are appended with `§` separators, removals clean up dangling separators, and char limits are enforced before every write.
 
-### Frozen Snapshot Behavior
+### Important: Frozen Snapshot
 
-Hermes injects memory as a frozen snapshot at session start. If Claude Code writes to memory via this bridge, the changes are persisted to disk immediately but will **not** appear in the current Hermes session's context. They will be available when Hermes starts a new session.
+Hermes injects memory as a frozen snapshot at session start. If an external MCP client writes to memory via this bridge, the changes are persisted to disk immediately but will **not** appear in the current Hermes session's context. They become visible when Hermes starts a new session.
 
 ### Dual Registration
 
