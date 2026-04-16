@@ -1757,7 +1757,13 @@ class AIAgent:
             )
 
         # ── Invalidate cached system prompt so it rebuilds next turn ──
+        # Also reload memory from disk so the rebuilt prompt captures any
+        # writes made since session start (by this session, external MCP
+        # clients, or concurrent gateway sessions). This is consistent with
+        # _invalidate_system_prompt() which does the same on compression.
         self._cached_system_prompt = None
+        if self._memory_store:
+            self._memory_store.load_from_disk()
 
         # ── Update _primary_runtime so the change persists across turns ──
         _cc = self.context_compressor if hasattr(self, "context_compressor") and self.context_compressor else None
